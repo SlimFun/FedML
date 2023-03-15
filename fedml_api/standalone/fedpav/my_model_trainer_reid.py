@@ -2,7 +2,7 @@ import logging
 
 import torch
 from torch import nn
-from fedml_api.model.SNIP.snip import SNIP
+from ...model.reid.ft_net import ft_net
 
 try:
     from fedml_core.trainer.model_trainer import ModelTrainer
@@ -11,6 +11,10 @@ except ImportError:
 
 
 class MyModelTrainer(ModelTrainer):
+
+    # def __init__(self, model):
+    #     super().__init__(model)
+        
     
     def get_model_params(self):
         return self.model.cpu().state_dict()
@@ -18,76 +22,18 @@ class MyModelTrainer(ModelTrainer):
     def set_model_params(self, model_parameters):
         self.model.load_state_dict(model_parameters)
 
-    def apply_prune_mask(self, net, keep_masks):
-        # Before I can zip() layers and pruning masks I need to make sure they match
-        # one-to-one by removing all the irrelevant modules:
-        prunable_layers = filter(
-            lambda layer: isinstance(layer, nn.Conv2d) or isinstance(
-                layer, nn.Linear), net.modules())
+    def update_classifier(self, classifier, model):
+        self.model.classifier.classifier = classifier
 
-        for layer, keep_mask in zip(prunable_layers, keep_masks):
-            assert (layer.weight.shape == keep_mask.shape)
-
-            def hook_factory(keep_mask):
-                """
-                The hook function can't be defined directly here because of Python's
-                late binding which would result in all hooks getting the very last
-                mask! Getting it through another function forces early binding.
-                """
-
-                def hook(grads):
-                    return grads * keep_mask
-
-                return hook
-
-            # mask[i] == 0 --> Prune parameter
-            # mask[i] == 1 --> Keep parameter
-
-            # Step 1: Set the masked weights to zero (NB the biases are ignored)
-            # Step 2: Make sure their gradients remain zero
-            layer.weight.data[keep_mask == 0.] = 0.
-            layer.weight.register_hook(hook_factory(keep_mask))
-
-    def rebuild_net(self, net, keep_masks):
-        prunable_layers = filter(
-            lambda layer: isinstance(layer, nn.Conv2d) or isinstance(
-                layer, nn.Linear), net.modules())
-
-        for layer, keep_mask in zip(prunable_layers, keep_masks):
-            assert (layer.weight.shape == keep_mask.shape)
-
-            def hook_factory(keep_mask):
-                """
-                The hook function can't be defined directly here because of Python's
-                late binding which would result in all hooks getting the very last
-                mask! Getting it through another function forces early binding.
-                """
-
-                def hook(grads):
-                    return grads
-
-                return hook
-
-            # mask[i] == 0 --> Prune parameter
-            # mask[i] == 1 --> Keep parameter
-
-            # Step 1: Set the masked weights to zero (NB the biases are ignored)
-            # Step 2: Make sure their gradients remain zero
-            layer.weight.data[keep_mask == 0.] = 0.
-            layer.weight.register_hook(hook_factory(keep_mask))
-
-    def train(self, train_data, device, args, cl, ml, traindata_cls_count):
+    def train(self, client_index, train_data, device, args, cl, ml, traindata_cls_count):
         model = self.model
+
         model.to(device)
-
-        keep_masks = SNIP(model, 0.05, train_data, device)
-        self.apply_prune_mask(model, keep_masks)
-
-        
         model.train()
 
+        print('start train')
         # train and update
-        criterion = nn.CrossEntropyLoss(reduction='none').to(device)
+        criterion = nn.CrossEntropyLoss().to(device)
         if args.client_optimizer == "sgd":
 #             optimizer = torch.optim.SGD(filter(lambda p: p.requires_grad, self.model.parameters()), lr=args.lr)
             optimizer = torch.optim.SGD(filter(lambda p: p.requires_grad, self.model.parameters()), lr=args.lr, momentum=0.9, weight_decay=5e-4)
@@ -103,22 +49,18 @@ class MyModelTrainer(ModelTrainer):
             for batch_idx, (x, labels) in enumerate(train_data):
                 x, labels = x.to(device), labels.to(device)
                 model.zero_grad()
-                log_probs, cova_score, feats = model(x)
+                outputs = model(x)
 #                 self.update_cova_memory(feats, labels, cl, ml)
 #                 is_weight = (1.0 / 5000) / (traindata_cls_count[])
-                is_weights = []
-                for l in labels:
-                    is_weights.append((1.0 / 10) / traindata_cls_count[l.cpu()])
-                is_weights = torch.FloatTensor(is_weights).to(device)
-#                 loss = is_weights * criterion(log_probs, labels)
-                loss = (is_weights * criterion(log_probs, labels)).mean()
-#                 print(is_weights)
-#                 print(loss.shape)
-#                 loss = (is_weights * loss).mean()
+                _, preds = torch.max(outputs.data, 1)
+                # print(f'client_index: {client_index}, outputs.shape: {outputs.shape}')
+                # print(f'client_index: {client_index}, labels: {torch.max(labels)}')
+                # print(labels)
+                loss = criterion(outputs, labels)
                 loss.backward()
 
                 # to avoid nan loss
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+                # torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
 
                 optimizer.step()
                 # logging.info('Update Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
@@ -130,10 +72,14 @@ class MyModelTrainer(ModelTrainer):
                 self.id, self.epoch, sum(epoch_loss) / len(epoch_loss)))
             scheduler.step()
             self.epoch += 1
+
+            # 下面这两行有点问题
+            # self.classifier = self.model.classifier.classifier
+            # optimizer.zero_grad()
+            # model.classifier.classifier = nn.Sequential()
             
             if self.epoch % args.freq_of_the_sync_stats == 0:
                 return False
-        self.rebuild_net(model, keep_masks)
         return True
     
     def update_cova_memory(self, feats, labels, cl, ml):

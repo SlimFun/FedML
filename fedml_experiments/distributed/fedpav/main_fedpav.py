@@ -13,11 +13,13 @@ import torch
 import wandb
 from mpi4py import MPI
 
+
 # add the FedML root directory to the python path
 sys.path.insert(0, os.path.abspath(os.path.join(os.getcwd(), "./../../../../")))
 sys.path.insert(0, os.path.abspath(os.path.join(os.getcwd(), "./../../../")))
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.getcwd(), "")))
+from fedml_api.data_preprocessing.reid.data_loader import load_partition_data_reid
 from fedml_api.distributed.utils.gpu_mapping import mapping_processes_to_gpu_device_from_yaml_file
 from fedml_api.data_preprocessing.FederatedEMNIST.data_loader import load_partition_data_federated_emnist
 from fedml_api.data_preprocessing.fed_cifar100.data_loader import load_partition_data_federated_cifar100
@@ -42,8 +44,10 @@ from fedml_api.model.nlp.rnn import RNN_OriginalFedAvg, RNN_StackOverFlow
 from fedml_api.model.linear.lr import LogisticRegression
 from fedml_api.model.cv.mobilenet_v3 import MobileNetV3
 from fedml_api.model.cv.efficientnet import EfficientNet
+from fedml_api.model.reid.ft_net import ft_net
 
-from fedml_api.distributed.fedavg.FedAvgAPI import FedML_init, FedML_FedAvg_distributed
+# from fedml_api.distributed.fedavg.FedAvgAPI import FedML_init, FedML_FedAvg_distributed
+from fedml_api.distributed.fedpav.FedPavAPI import FedML_init, FedML_FedPav_distributed
 
 
 def add_args(parser):
@@ -214,6 +218,15 @@ def load_data(args, dataset_name):
                                                   client_number=args.client_num_in_total, batch_size=args.batch_size)
 
 
+    elif dataset_name == "reid":
+        train_data_num, test_data_num, train_data_global, test_data_global, \
+        train_data_local_num_dict, train_data_local_dict, test_data_local_dict, \
+        class_num = load_partition_data_reid(args.dataset, args.data_dir, args.partition_method, 
+                        args.client_num_in_total, args.batch_size)
+        traindata_cls_counts = None
+        # data_loader = 
+        # print()
+
     else:
         if dataset_name == "cifar10":
             data_loader = load_partition_data_cifar10
@@ -235,43 +248,8 @@ def load_data(args, dataset_name):
 
 def create_model(args, model_name, output_dim):
     logging.info("create_model. model_name = %s, output_dim = %s" % (model_name, output_dim))
-    model = None
-    if model_name == "lr" and args.dataset == "mnist":
-        logging.info("LogisticRegression + MNIST")
-        model = LogisticRegression(28 * 28, output_dim)
-    elif model_name == "rnn" and args.dataset == "shakespeare":
-        logging.info("RNN + shakespeare")
-        model = RNN_OriginalFedAvg()
-    elif model_name == "cnn" and args.dataset == "femnist":
-        logging.info("CNN + FederatedEMNIST")
-        model = CNN_DropOut(False)
-    elif model_name == "resnet18_gn" and args.dataset == "fed_cifar100":
-        logging.info("ResNet18_GN + Federated_CIFAR100")
-        model = resnet18()
-    elif model_name == "rnn" and args.dataset == "fed_shakespeare":
-        logging.info("RNN + fed_shakespeare")
-        model = RNN_OriginalFedAvg()
-    elif model_name == "lr" and args.dataset == "stackoverflow_lr":
-        logging.info("lr + stackoverflow_lr")
-        model = LogisticRegression(10004, output_dim)
-    elif model_name == "rnn" and args.dataset == "stackoverflow_nwp":
-        logging.info("CNN + stackoverflow_nwp")
-        model = RNN_StackOverFlow()
-    elif model_name == "resnet56":
-        model = resnet56(class_num=output_dim)
-    elif model_name == "resnet50":
-        model = ResNet50()
-    elif model_name == "resnet18":
-        model = ResNet18()
-    elif model_name == "mobilenet":
-        model = mobilenet(class_num=output_dim)
-    # TODO
-    elif model_name == 'mobilenet_v3':
-        '''model_mode \in {LARGE: 5.15M, SMALL: 2.94M}'''
-        model = MobileNetV3(model_mode='LARGE')
-    elif model_name == 'efficientnet':
-        model = EfficientNet()
-
+    model = ft_net(750)
+    model.classifier.classifier = torch.nn.Sequential()
     return model
 
 
@@ -305,15 +283,15 @@ if __name__ == "__main__":
                  ", process Name = " + str(psutil.Process(os.getpid())))
 
     # initialize the wandb machine learning experimental tracking platform (https://www.wandb.com/).
-    if process_id == 0:
-        wandb.init(
-            # project="federated_nas",
-            project="fedml",
-            name="FedAVG(d)" + str(args.partition_method) + "r" + str(args.comm_round)+ "-stas"+ str(args.freq_of_the_sync_stats) + "-" + str(args.model) + "-e" + str(
-                args.epochs) + "-lr" + str(
-                args.lr),
-            config=args
-        )
+    # if process_id == 0:
+    #     wandb.init(
+    #         # project="federated_nas",
+    #         project="fedml",
+    #         name="FedAVG(d)" + str(args.partition_method) + "r" + str(args.comm_round)+ "-stas"+ str(args.freq_of_the_sync_stats) + "-" + str(args.model) + "-e" + str(
+    #             args.epochs) + "-lr" + str(
+    #             args.lr),
+    #         config=args
+    #     )
 
     # Set the random seed. The np.random seed determines the dataset partition.
     # The torch_manual_seed determines the initial weight.
@@ -328,9 +306,10 @@ if __name__ == "__main__":
     device = mapping_processes_to_gpu_device_from_yaml_file(process_id, worker_number, args.gpu_mapping_file, args.gpu_mapping_key)
 
     # load data
-    dataset = load_data(args, args.dataset)
+    args.dataset = 'Market,MSMT17,DukeMTMC-reID,cuhk03-np-detected'
+    dataset = load_data(args, 'reid')
     [train_data_num, test_data_num, train_data_global, test_data_global,
-     train_data_local_num_dict, train_data_local_dict, test_data_local_dict, class_num, traindata_cls_counts] = dataset
+     train_data_local_num_dict, train_data_local_dict, test_data_local_dict, class_num_dict, traindata_cls_counts] = dataset
 
     # create model.
     # Note if the model is DNN (e.g., ResNet), the training will be very slow.
@@ -341,11 +320,14 @@ if __name__ == "__main__":
     # try:
         # start "federated averaging (FedAvg)"
     try:
-        FedML_FedAvg_distributed(process_id, worker_number, device, comm,
+        # pass
+        FedML_FedPav_distributed(process_id, worker_number, device, comm,
                                 model, train_data_num, train_data_global, test_data_global,
-                                train_data_local_num_dict, train_data_local_dict, test_data_local_dict, args, traindata_cls_counts)
+                                train_data_local_num_dict, train_data_local_dict, test_data_local_dict, args, traindata_cls_counts, class_num_dict)
     except BaseException as e:
         print(str(e))
+        logging.info('traceback.format_exc():\n%s' % traceback.format_exc())
+        # MPI.COMM_WORLD.Abort()
     # except Exception as e:
     #     print(e)
     #     logging.info('traceback.format_exc():\n%s' % traceback.format_exc())
